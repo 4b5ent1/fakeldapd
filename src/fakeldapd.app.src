@@ -1,0 +1,60 @@
+{application, fakeldapd,
+ [
+  {description, "Fake LDAP Server"},
+  {vsn, "0.0.1"},
+  {modules, []},
+  {registered, [fakeldapd_sup]},
+  {applications, [kernel, stdlib]},
+  {mod, {fakeldapd_app, []}},
+  {env,
+   [
+    {port,            10389},
+    {rootDN,          [[{"ou","people"}],[{"dc","example"}],[{"dc","com"}]]},
+    {rootLDIF,
+     [{"ou",          ["people"]},
+      {"objectClass", ["organizationalUnit"]}
+     ]
+    },
+    {fetchTimeout,    10000},
+    {authTimeout,     10000},
+    {refreshInterval, 1800000},
+    {fetchFun,        {fakeldapd_fakedata, fetch, []}},
+    {authFun,         {fakeldapd_fakedata, auth, []}},
+    {fakeUserData,
+     [
+      { "admin",
+        [{"objectClass",   ["posixAccount", "inetOrgPerson"]},
+         {"loginShell",    ["/bin/bash"]},
+         {"uid",           ["admin"]},
+         {"cn",            ["admin"]},
+         {"displayName",   ["admin"]},
+         {"homeDirectory", ["/home/admin"]},
+         {"mail",          ["admin@example.com"]},
+         {"uidNumber",     ["10000"]},
+         {"gidNumber",     ["10000"]}
+        ]
+      },
+      { "joe",
+        [{"objectClass",   ["posixAccount", "inetOrgPerson"]},
+         {"loginShell",    ["/bin/bash"]},
+         {"uid",           ["joe"]},
+         {"cn",            ["joe"]},
+         {"displayName",   ["joe"]},
+         {"homeDirectory", ["/home/joe"]},
+         {"mail",          ["joe@example.com"]},
+         {"uidNumber",     ["10001"]},
+         {"gidNumber",     ["10001"]}
+        ]
+      }
+     ]
+    },
+    {fakeAuthData,
+     [
+      {"admin", "secret"},
+      {"joe",   "password"}
+     ]
+    }
+   ]
+  }
+ ]
+}.
