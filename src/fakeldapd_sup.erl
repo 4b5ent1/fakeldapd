@@ -34,29 +34,24 @@ init([Port]) ->
            [fakeldapd_connection_sup]
          },
 
-         { fakeldapd_userdata,
-           {fakeldapd_userdata, start_link, []},
-           permanent, brutal_kill, worker,
-           [fakeldapd_userdata]
-         },
-
-         { fakeldapd_userdata_fetcher_sup,
-           {fakeldapd_userdata_fetcher_sup, start_link, []},
+         { fakeldapd_data_fetcher_sup,
+           {fakeldapd_data_fetcher_sup, start_link, []},
            permanent, brutal_kill, supervisor,
-           [fakeldapd_userdata_fetcher_sup]
+           [fakeldapd_data_fetcher_sup]
          },
 
-         { fakeldapd_authenticator_sup,
-           {fakeldapd_authenticator_sup, start_link, []},
+         { fakeldapd_table_owner_sup,
+           {fakeldapd_table_owner_sup, start_link, []},
            permanent, brutal_kill, supervisor,
-           [fakeldapd_authenticator_sup]
+           [fakeldapd_table_owner_sup]
          },
 
-         { fakeldapd_fakedata,
-           {fakeldapd_fakedata, start_link, []},
+         { fakeldapd_table_manager,
+           {fakeldapd_table_manager, start_link, []},
            permanent, brutal_kill, worker,
-           [fakeldapd_fakedata]
+           [fakeldapd_table_manager]
          }
+
         ],
 
     {ok, {SupFlags, ChildSpecs}}.

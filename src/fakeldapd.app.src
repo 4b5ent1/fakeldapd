@@ -4,56 +4,41 @@
   {vsn, "0.0.1"},
   {modules, []},
   {registered, [fakeldapd_sup]},
-  {applications, [kernel, stdlib]},
+  {applications, [kernel, stdlib, inets, asn1, parsetools, crypto, public_key, ssl]},
   {mod, {fakeldapd_app, []}},
   {env,
    [
-    {port,            10389},
-    {rootDN,          [[{"ou","people"}],[{"dc","example"}],[{"dc","com"}]]},
-    {rootLDIF,
-     [{"ou",          ["people"]},
-      {"objectClass", ["organizationalUnit"]}
-     ]
-    },
-    {fetchTimeout,    10000},
-    {authTimeout,     10000},
-    {refreshInterval, 1800000},
-    {fetchFun,        {fakeldapd_fakedata, fetch, []}},
-    {authFun,         {fakeldapd_fakedata, auth, []}},
-    {fakeUserData,
+    {port,              10389},
+    {refresh_interval,  300000},
+
+    {fetch_fun,         {fakeldapd_fakedata, fetch, []}},
+    {fetch_timeout,     300000},
+
+    {search_fun,        {fakeldapd_fakedata, search, []}},
+    {search_timeout,    60000},
+
+    {auth_fun,          {fakeldapd_fakedata, auth, []}},
+    {auth_timeout,      60000},
+
+    {rootDN,           [[{"dc","example"}], [{"dc", "com"}]]},
+    {ouDN,             [[{"ou", "people"}], [{"dc", "example"}], [{"dc", "com"}]]},
+
+    {static_entries,
      [
-      { "admin",
-        [{"objectClass",   ["posixAccount", "inetOrgPerson"]},
-         {"loginShell",    ["/bin/bash"]},
-         {"uid",           ["admin"]},
-         {"cn",            ["admin"]},
-         {"displayName",   ["admin"]},
-         {"homeDirectory", ["/home/admin"]},
-         {"mail",          ["admin@example.com"]},
-         {"uidNumber",     ["10000"]},
-         {"gidNumber",     ["10000"]}
-        ]
+      {[[{"dc","example"}], [{"dc", "com"}]],
+       [{"dc",          ["example"]},
+        {"o",           ["Example, Inc."]},
+        {"objectClass", ["dcObject", "organization"]}]
       },
-      { "joe",
-        [{"objectClass",   ["posixAccount", "inetOrgPerson"]},
-         {"loginShell",    ["/bin/bash"]},
-         {"uid",           ["joe"]},
-         {"cn",            ["joe"]},
-         {"displayName",   ["joe"]},
-         {"homeDirectory", ["/home/joe"]},
-         {"mail",          ["joe@example.com"]},
-         {"uidNumber",     ["10001"]},
-         {"gidNumber",     ["10001"]}
-        ]
+
+      {[[{"ou", "people"}], [{"dc", "example"}], [{"dc", "com"}]],
+       [{"ou",          ["people"]},
+        {"objectClass", ["organizationalUnit"]}
+       ]
       }
      ]
-    },
-    {fakeAuthData,
-     [
-      {"admin", "secret"},
-      {"joe",   "password"}
-     ]
     }
+
    ]
   }
  ]

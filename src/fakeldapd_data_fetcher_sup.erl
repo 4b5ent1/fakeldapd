@@ -1,4 +1,4 @@
--module(fakeldapd_userdata_fetcher_sup).
+-module(fakeldapd_data_fetcher_sup).
 
 -behaviour(supervisor).
 
@@ -18,10 +18,10 @@ init([]) ->
      {
        {simple_one_for_one, 0, 1},
        [
-        { fakeldapd_userdata_fetcher,
-          {fakeldapd_userdata_fetcher, start_link, []},
+        { fakeldapd_data_fetcher,
+          {fakeldapd_data_fetcher, start_link, []},
           temporary, brutal_kill, worker,
-          [fakeldapd_userdata_fetcher]
+          [fakeldapd_data_fetcher]
         }
        ]
      }

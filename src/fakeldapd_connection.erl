@@ -2,22 +2,23 @@
 
 -behaviour(gen_server).
 
--include("ELDAPv3.hrl").
+-include("LDAP.hrl").
 
 -export([start_link/1]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
+-export([do_search/4, do_auth/5]).
+
+
 -define(SERVER, ?MODULE).
 
 -record(state,
         {socket,
-         bind,
-         requests,
-         rootDN,
-         rootLDIF,
-         fetchTimeout,
-         authTimeout}).
+         bind, %% {binding, Pid}, anonymous, {user, User}
+         handlers,
+         auth_timeout,
+         search_timeout}).
 
 
 
@@ -25,62 +26,24 @@ start_link(Socket) ->
     gen_server:start_link(?MODULE, [Socket], []).
 
 
+
 init([Socket]) ->
-    {ok, RootDN} = application:get_env(fakeldapd, rootDN),
-    {ok, RootLDIF} = application:get_env(fakeldapd, rootLDIF),
-    {ok, FetchTimeout} = application:get_env(fakeldapd, fetchTimeout),
-    {ok, AuthTimeout} = application:get_env(fakeldapd, authTimeout),
+    {ok, AuthTimeout} = application:get_env(fakeldapd, auth_timeout),
+    {ok, SearchTimeout} = application:get_env(fakeldapd, search_timeout),
+
+    process_flag(trap_exit, true),
     inet:setopts(Socket, [{active, once}]),
     { ok,
       #state{
          socket=Socket,
          bind=anonymous,
-         requests=[],
-         rootDN=RootDN,
-         rootLDIF=RootLDIF,
-         fetchTimeout=FetchTimeout,
-         authTimeout=AuthTimeout
-        }
-    }.
+         handlers=dict:new(),
+         auth_timeout=AuthTimeout,
+         search_timeout=SearchTimeout}}.
 
 
-handle_call(_Request, _From, State) ->
-    {reply, ok, State}.
 
-
-handle_cast({timeout, auth, ID}, State = #state{socket=Socket, requests={binding, ID}}) ->
-    send_response(
-      Socket,
-      ID,
-      { bindResponse,
-        #'BindResponse' {
-           resultCode = invalidCredentials,
-           matchedDN = "",
-           diagnosticMessage = "timeout"
-        }
-      }),
-    {noreply, State#state{bind=anonymous, requests=[]}};
-handle_cast({timeout, fetch, _}, State = #state{requests={binding, _}}) ->
-    {noreply, State};
-handle_cast({timeout, fetch, ID}, State = #state{socket=Socket, requests=Requests}) ->
-    case lists:member(ID, Requests) of
-        false ->
-            {noreply, State};
-        true ->
-            send_response(
-              Socket,
-              ID,
-              { searchResDone,
-                #'LDAPResult' {
-                   resultCode = timeLimitExceeded,
-                   matchedDN = "",
-                   diagnosticMessage = ""
-                  }
-              }),
-            {noreply, State#state{requests=lists:delete(ID, Requests)}}
-    end;
-
-handle_cast({auth_succeed, ID, Name}, State = #state{socket=Socket, requests={binding, ID}}) ->
+handle_call({auth_result, ID, {ok, Name}}, {Pid, _Tag}, State = #state{socket=Socket, bind={binding, ID, Pid}}) ->
     send_response(
       Socket,
       ID,
@@ -91,8 +54,22 @@ handle_cast({auth_succeed, ID, Name}, State = #state{socket=Socket, requests={bi
            diagnosticMessage = ""
           }
       }),
-    {noreply, State#state{bind={user, Name}, requests=[]}};
-handle_cast({auth_failure, ID}, State = #state{socket=Socket, requests={binding, ID}}) ->
+
+    {reply, ok, State#state{bind={user, Name}}};
+handle_call({auth_result, ID, unavailable}, {Pid, _Tag}, State = #state{socket=Socket, bind={binding, ID, Pid}}) ->
+    send_response(
+      Socket,
+      ID,
+      { bindResponse,
+        #'BindResponse' {
+           resultCode = unavailable,
+           matchedDN = "",
+           diagnosticMessage = ""
+        }
+      }),
+
+    {reply, ok, State#state{bind=anonymous}};
+handle_call({auth_result, ID, _}, {Pid, _Tag}, State = #state{socket=Socket, bind={binding, ID, Pid}}) ->
     send_response(
       Socket,
       ID,
@@ -103,50 +80,67 @@ handle_cast({auth_failure, ID}, State = #state{socket=Socket, requests={binding,
            diagnosticMessage = ""
         }
       }),
-    {noreply, State#state{bind=anonymous, requests=[]}};
-handle_cast({result, _, _, _}, State = #state{requests={binding, _}}) ->
-    {noreply, State};
-handle_cast({result, MessageID, UID, LDIF}, State = #state{socket=Socket, requests=Requests, rootDN=RootDN}) ->
-    case lists:member(MessageID, Requests) of
-        false ->
-            {noreply, State};
-        true ->
-            case LDIF of
-                none ->
-                    send_response(
-                      Socket,
-                      MessageID,
-                      { searchResDone,
-                        #'LDAPResult' {
-                           resultCode = noSuchObject,
-                           matchedDN = "",
-                           diagnosticMessage = ""
-                          }
-                      });
-                _ ->
-                    send_result_entry(Socket, MessageID, [[{"uid",UID}]|RootDN], LDIF),
-                    send_response(
-                      Socket,
-                      MessageID,
-                      { searchResDone,
-                        #'LDAPResult' {
-                           resultCode = success,
-                           matchedDN = "",
-                           diagnosticMessage = ""
-                          }
-                      })
-            end,
-            {noreply, State#state{requests=lists:delete(MessageID, Requests)}}
-    end;
+
+    {reply, ok, State#state{bind=anonymous}};
+handle_call({search_result_entry, ID, Entry}, {FromPid, _Tag}, State = #state{socket=Socket, handlers=Handlers}) ->
+    case dict:find(ID, Handlers) of
+        {ok, FromPid} ->
+            send_response(Socket, ID, {searchResEntry, Entry});
+        _ ->
+            ok
+    end,
+    {reply, ok, State};
+handle_call({search_result_done, ID, Result}, {FromPid, _Tag}, State = #state{socket=Socket, handlers=Handlers}) ->
+    NewHandlers =
+        case dict:find(ID, Handlers) of
+            {ok, FromPid} ->
+                send_response(Socket, ID, {searchResDone, Result}),
+                dict:erase(ID, Handlers);
+            _ ->
+                Handlers
+        end,
+    {reply, ok, State#state{handlers=NewHandlers}};
+handle_call(_Request, _From, State) ->
+    {reply, ok, State}.
+
+
+
+handle_cast({timeout, auth, ID}, State = #state{socket=Socket, bind={binding, ID, Pid}}) ->
+    exit(Pid, timeout),
+    send_response(
+      Socket,
+      ID,
+      { bindResponse,
+        #'BindResponse' {
+           resultCode = invalidCredentials,
+           matchedDN = "",
+           diagnosticMessage = "timeout"
+        }
+      }),
+
+    {noreply, State#state{bind=anonymous}};
+handle_cast({timeout, search, ID}, State = #state{socket=Socket, handlers=Handlers}) ->
+    NewHandlers =
+        case dict:find(ID, Handlers) of
+            {ok, Pid} ->
+                exit(Pid, timeout),
+                send_response(Socket, ID, simple_response(searchResDone, timeLimitExceeded)),
+                dict:erase(ID, Handlers);
+            _ ->
+                Handlers
+        end,
+    {noreply, State#state{handlers=NewHandlers}};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
 
-handle_info({tcp, Socket, Data}, State = #state{socket=Socket, requests=Requests}) ->
-    case asn1rt:decode('ELDAPv3', 'LDAPMessage', Data) of
-        {ok, Message = #'LDAPMessage' {messageID=ID, controls=asn1_NOVALUE}} ->
-            case Requests of
-                {binding, _} ->
+handle_info({'EXIT', _Pid, _Reason}, State) ->
+    {noreply, State};
+handle_info({tcp, Socket, Data}, State = #state{socket=Socket, bind=Bind}) ->
+    case asn1rt:decode('LDAP', 'LDAPMessage', Data) of
+        {ok, Message = #'LDAPMessage' {messageID=ID, controls=_}} ->
+            case Bind of
+                {binding, _, _} ->
                     gen_tcp:close(Socket),
                     {stop, request_while_binding, State};
                 _ ->
@@ -168,7 +162,11 @@ handle_info({tcp, Socket, Data}, State = #state{socket=Socket, requests=Requests
             {stop, Reason, State}
     end;
 handle_info({tcp_closed, Socket}, State = #state{socket=Socket}) ->
-    {stop, normal, State}.
+    {stop, shutdown, State};
+handle_info({tcp_error, Socket, Reason}, State = #state{socket=Socket}) ->
+    {stop, {tcp_error, Reason}, State};
+handle_info(_Info, State) ->
+    {noreply, State}.
 
 
 terminate(_Reason, _State) ->
@@ -183,39 +181,77 @@ code_change(_OldVsn, State, _Extra) ->
 
 send_response(Socket, ID, Response) ->
     Message = #'LDAPMessage'{messageID=ID, protocolOp=Response},
-    {ok, Data} = asn1rt:encode('ELDAPv3', 'LDAPMessage', Message),
+    {ok, Data} = asn1rt:encode('LDAP', 'LDAPMessage', Message),
     gen_tcp:send(Socket, Data).
 
 
-format_dn(DN) ->
-    string:join(
-      [
-       string:join([ (T ++ "=" ++ V) || {T,V} <- RDN ], "+")
-       || RDN <- DN
-      ], ",").
+simple_response(Op, Code) ->
+    { Op,
+      #'LDAPResult' {
+         resultCode = Code,
+         matchedDN = "",
+         diagnosticMessage = ""}
+    }.
 
 
-send_result_entry(Socket, ID, DN, Attrs) ->
-    send_response(
-      Socket,
-      ID,
-      { searchResEntry,
-        #'SearchResultEntry' {
-           objectName=format_dn(DN),
-           attributes=[#'PartialAttribute'{type=T, vals=V} || {T,V} <- Attrs]}
-      }
-     ).
+
+to_limit(0) ->
+    infinity;
+to_limit(X) ->
+    X.
 
 
-parse_dn(S) ->
-    case dn_lexer:string(S) of
-        {ok, Tokens, _} ->
-            dn_parser:parse(Tokens);
-        _ ->
-            error
-    end.
+handle_msg(#'LDAPMessage' {protocolOp = {modifyRequest, _}}, State) ->
+    {reply, simple_response(modifyResponse, invalidCredentials), State};
+handle_msg(#'LDAPMessage' {protocolOp = {addRequest, _}}, State) ->
+    {reply, simple_response(addResponse, invalidCredentials), State};
+handle_msg(#'LDAPMessage' {protocolOp = {delRequest, _}}, State) ->
+    {reply, simple_response(delResponse, invalidCredentials), State};
+handle_msg(#'LDAPMessage' {protocolOp = {modDNRequest, _}}, State) ->
+    {reply, simple_response(modDNResponse, invalidCredentials), State};
+handle_msg(#'LDAPMessage' {protocolOp = {compareRequest, _}}, State) ->
+    {reply, simple_response(compareDNResponse, invalidCredentials), State};
+handle_msg(#'LDAPMessage' {protocolOp = {extendedReq, _}}, State) ->
+    { reply,
+      { extendedResp,
+        #'ExtendedResponse' {
+           resultCode = invalidCredentials,
+           matchedDN = "",
+           diagnosticMessage = ""
+          }
+      },
+      State};
+handle_msg(#'LDAPMessage' {protocolOp={unbindRequest, 'NULL'}}, State) ->
+    {stop, shutdown, State};
 
 
+
+handle_msg(
+  #'LDAPMessage' {
+     protocolOp=
+         { bindRequest,
+           #'BindRequest' {
+              version = 3,
+              authentication = {sasl, _}
+             }}},
+  State = #state{socket=Socket, handlers=Handlers}) ->
+    dict:map(
+      fun (MessageID, HandlerPid) ->
+              exit(HandlerPid, binding),
+              send_response(Socket, MessageID, simple_response(searchResDone, operationsError))
+      end,
+      Handlers),
+
+    { reply,
+      { bindResponse,
+        #'BindResponse' {
+           resultCode = authMethodNotSupported,
+           matchedDN = "",
+           diagnosticMessage = ""
+          }
+      },
+      State#state{bind=anonymous}
+    };
 handle_msg(
   #'LDAPMessage' {
      protocolOp=
@@ -225,7 +261,14 @@ handle_msg(
               name = [],
               authentication = {simple, []}
              }}},
-  State) ->
+  State = #state{socket=Socket, handlers=Handlers}) ->
+    dict:map(
+      fun (MessageID, HandlerPid) ->
+              exit(HandlerPid, binding),
+              send_response(Socket, MessageID, simple_response(searchResDone, operationsError))
+      end,
+      Handlers),
+
     { reply,
       { bindResponse,
         #'BindResponse' {
@@ -246,58 +289,45 @@ handle_msg(
               name = Name,
               authentication = {simple, Pass}
              }}},
-  State = #state{socket=Socket, requests=Requests, rootDN=RootDN, fetchTimeout=Timeout}) ->
-    lists:map(
-      fun (MessageID) ->
-              send_response(
-                Socket,
-                MessageID,
-                { searchResDone,
-                  #'LDAPResult' {
-                     resultCode = operationsError,
-                     matchedDN = "",
-                     diagnosticMessage = "Duplicate Message ID"
-                    }
-                })
+  State = #state{
+             socket=Socket,
+             handlers=Handlers,
+             auth_timeout=AuthTimeout}) ->
+    dict:map(
+      fun (MessageID, HandlerPid) ->
+              exit(HandlerPid, binding),
+              send_response(Socket, MessageID, simple_response(searchResDone, operationsError))
       end,
-      Requests),
+      Handlers),
 
-    case parse_dn(Name) of
-        {ok, [[{"uid", UID}]|RootDN]} ->
-            case supervisor:start_child(fakeldapd_authenticator_sup, [self(), ID, UID, Pass]) of
-                {ok, _} ->
-                    ok;
-                {ok, _, _} ->
-                    ok
-            end,
+    Timer =
+        case AuthTimeout of
+            0 ->
+                none;
+            infinity ->
+                none;
+            _ ->
+                {ok, TRef} =
+                    timer:apply_after(AuthTimeout, gen_server, cast, [self(), {timeout, auth, ID}]),
+                TRef
+        end,
 
-            timer:apply_after(
-              Timeout,
-              gen_server,
-              cast,
-              [self(), {timeout, auth, ID}]),
-
-            {noreply, State#state{requests={binding, ID}}};
-        _ ->
-            { reply,
-              { bindResponse,
-                #'BindResponse' {
-                   resultCode = invalidCredentials,
-                   matchedDN = "",
-                   diagnosticMessage = ""
-                  }
-              },
-              State#state{requests=[]}}
-    end;
-handle_msg(#'LDAPMessage' {protocolOp={unbindRequest, 'NULL'}}, State) ->
-    {stop, normal, State};
+    Pid = spawn_link(?MODULE, do_auth, [self(), Timer, ID, Name, Pass]),
+    { noreply,
+      State#state{
+        bind={binding, ID, Pid},
+        handlers=dict:new()}
+    };
 handle_msg(
   #'LDAPMessage' {
      messageID = ID,
-     protocolOp = { searchRequest, #'SearchRequest' {} = Request }
+     protocolOp =
+         { searchRequest,
+           #'SearchRequest' {timeLimit=TimeLimit} = Request
+         }
     },
-  State = #state{requests=Requests} ) ->
-    case lists:member(ID, Requests) of
+  State = #state{handlers=Handlers, search_timeout=SearchTimeout} ) ->
+    case dict:is_key(ID, Handlers) of
         true ->
             { reply,
               { searchResDone,
@@ -309,168 +339,81 @@ handle_msg(
               },
               State};
         false ->
-            handle_search(ID, Request, State)
+            Timeout = min(to_limit(TimeLimit), to_limit(SearchTimeout)),
+            Timer =
+                case Timeout of
+                    infinity ->
+                        none;
+                    _ ->
+                        {ok, TRef} =
+                            timer:apply_after(Timeout, gen_server, cast, [self(), {timeout, search, ID}]),
+                        TRef
+                end,
+
+            Pid = spawn_link(?MODULE, do_search, [self(), Timer, ID, Request]),
+            { noreply,
+              State#state{handlers=dict:store(ID, Pid, Handlers)}}
     end;
 handle_msg(
   #'LDAPMessage' {
      protocolOp = {abandonRequest, ID}
     },
-  State = #state{requests=Requests}) ->
-    {noreply, State#state{requests=lists:delete(ID, Requests)}};
-
-handle_msg(
-  #'LDAPMessage' {
-     protocolOp = { modifyRequest, _}
-    },
-  State) ->
-    { reply,
-      { modifyResponse,
-        #'LDAPResult' {
-           resultCode = invalidCredentials,
-           matchedDN = "",
-           diagnosticMessage = ""
-          }
-      },
-      State};
-handle_msg(
-  #'LDAPMessage' {
-     protocolOp = { addRequest, _}
-    },
-  State) ->
-    { reply,
-      { addResponse,
-        #'LDAPResult' {
-           resultCode = invalidCredentials,
-           matchedDN = "",
-           diagnosticMessage = ""
-          }
-      },
-      State};
-handle_msg(
-  #'LDAPMessage' {
-     protocolOp = { delRequest, _}
-    },
-  State) ->
-    { reply,
-      { delResponse,
-        #'LDAPResult' {
-           resultCode = invalidCredentials,
-           matchedDN = "",
-           diagnosticMessage = ""
-          }
-      },
-      State};
-handle_msg(
-  #'LDAPMessage' {
-     protocolOp = { modDNRequest, _}
-    },
-  State) ->
-    { reply,
-      { modDNResponse,
-        #'LDAPResult' {
-           resultCode = invalidCredentials,
-           matchedDN = "",
-           diagnosticMessage = ""
-          }
-      },
-      State};
-handle_msg(
-  #'LDAPMessage' {
-     protocolOp = { compareRequest, _}
-    },
-  State) ->
-    { reply,
-      { compareResponse,
-        #'LDAPResult' {
-           resultCode = invalidCredentials,
-           matchedDN = "",
-           diagnosticMessage = ""
-          }
-      },
-      State};
-
-handle_msg(
-  #'LDAPMessage' {
-     protocolOp = { extendedReq, _}
-    },
-  State) ->
-    { reply,
-      { extendedResp,
-        #'ExtendedResponse' {
-           resultCode = invalidCredentials,
-           matchedDN = "",
-           diagnosticMessage = ""
-          }
-      },
-      State};
+  State = #state{handlers=Handlers}) ->
+    NewHandlers =
+        case dict:find(ID, Handlers) of
+            {ok, Pid} ->
+                exit(Pid, abandon),
+                dict:erase(ID, Handlers);
+            error ->
+                Handlers
+        end,
+    {noreply, State#state{handlers=NewHandlers}};
 handle_msg(#'LDAPMessage' {messageID=ID, protocolOp=Op, controls=Ctls}, State) ->
     io:format("Msg: ~w ~w ~w~n", [ID, Op, Ctls]),
     {noreply, State}.
 
 
 
-handle_search(
-  ID,
-  #'SearchRequest' {
-     baseObject = BaseDN,
-     scope = baseObject
-    },
-  State = #state{socket=Socket, requests=Requests, rootDN=RootDN, rootLDIF=RootLDIF, fetchTimeout=Timeout}) ->
-    case parse_dn(BaseDN) of
-        {ok, RootDN} ->
-            send_result_entry(Socket, ID, RootDN, RootLDIF),
-            { reply,
-              { searchResDone,
+do_search(Conn, Timer, MessageID, Request) ->
+    Table = gen_server:call(fakeldapd_table_manager, request_table),
+
+    case Table of
+        none ->
+            Result =
                 #'LDAPResult' {
-                   resultCode = success,
+                   resultCode = unavailable,
                    matchedDN = "",
                    diagnosticMessage = ""
-                  }
-              },
-              State};
-        {ok, [[{"uid", UID}]|RootDN]} ->
-            gen_server:cast(fakeldapd_userdata, {find_user, UID, self(), ID}),
-
-            timer:apply_after(
-              Timeout,
-              gen_server,
-              cast,
-              [self(), {timeout, fetch, ID}]),
-
-            {noreply, State#state{requests=Requests++[ID]}};
-        {ok, _} ->
-            { reply,
-              { searchResDone,
-                #'LDAPResult' {
-                   resultCode = noSuchObject,
-                   matchedDN = "",
-                   diagnosticMessage = ""
-                  }
-              },
-              State};
+                  },
+            gen_server:call(Conn, {search_result_done, MessageID, Result});
         _ ->
-            { reply,
-              { searchResDone,
-                #'LDAPResult' {
-                   resultCode = invalidDNSyntax,
-                   matchedDN = "",
-                   diagnosticMessage = ""
-                  }
-              },
-              State}
-    end;
+            {ok, {M, F, A}} = application:get_env(fakeldapd, search_fun),
+            Result = apply(M, F, [Conn, Table, MessageID, Request|A]),
+            gen_server:call(Conn, {search_result_done, MessageID, Result}),
+            case Timer of
+                none ->
+                    ok;
+                _ ->
+                    timer:cancel(Timer)
+            end
+    end.
 
 
-handle_search(
-  _ID,
-  _Req,
-  State) ->
-    { reply,
-      { searchResDone,
-        #'LDAPResult' {
-           resultCode = noSuchObject,
-           matchedDN = "",
-           diagnosticMessage = ""
-          }
-      },
-      State}.
+do_auth(Conn, Timer, MessageID, Name, Pass) ->
+    Table = gen_server:call(fakeldapd_table_manager, request_owner),
+
+    case Table of
+        none ->
+            gen_server:call(Conn, {auth_result, MessageID, unavailable});
+        _ ->
+
+            {ok, {M, F, A}} = application:get_env(fakeldapd, auth_fun),
+            Result = apply(M, F, [Table, Name, Pass|A]),
+            gen_server:call(Conn, {auth_result, MessageID, Result}),
+            case Timer of
+                none ->
+                    ok;
+                _ ->
+                    timer:cancel(Timer)
+            end
+    end.

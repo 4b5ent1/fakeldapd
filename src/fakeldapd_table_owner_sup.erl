@@ -1,4 +1,4 @@
--module(fakeldapd_authenticator_sup).
+-module(fakeldapd_table_owner_sup).
 
 -behaviour(supervisor).
 
@@ -7,7 +7,6 @@
 -export([init/1]).
 
 -define(SERVER, ?MODULE).
-
 
 
 start_link() ->
@@ -19,10 +18,10 @@ init([]) ->
      {
        {simple_one_for_one, 0, 1},
        [
-        { fakeldapd_authenticator,
-          {fakeldapd_authenticator, start_link, []},
+        { fakeldapd_table_owner,
+          {fakeldapd_table_owner, start_link, []},
           temporary, brutal_kill, worker,
-          [fakeldapd_authenticator]
+          [fakeldapd_table_owner]
         }
        ]
      }
